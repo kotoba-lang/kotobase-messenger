@@ -1,0 +1,41 @@
+{
+  "lexicon": 1,
+  "id": "app.aozora.convo.sendSealed",
+  "description": "Send a sender-metadata-sealed message: unlike app.aozora.convo.send, the stored record carries NO senderDid field and is written under a neutral, non-attributing repo (\"mailbox\"), not the caller's own — anyone scanning the AppView sees only that SOMETHING was sent to toDid, not who sent it. The caller is still authenticated (a valid session is required) so this is not an open relay for spam/abuse; authentication and attribution are deliberately separated (same scope Signal's own Sealed Sender has toward its own servers — the app-aozora PDS still learns the sender at request time, it just never persists it). ciphertext MUST be an already-established E2E session's envelope (yoro-ui.interop.signal) with the true senderDid embedded INSIDE the encrypted payload, so only toDid's own client — the one party who can decrypt it — ever learns who sent it. 1:1 DMs only for now; group sealed sending is not supported (fan-out to N recipients would need N sealed records, one per member, not implemented yet).",
+  "defs": {
+    "main": {
+      "type": "procedure",
+      "input": {
+        "encoding": "application/json",
+        "schema": {
+          "type": "object",
+          "properties": {
+            "convoId": { "type": "string" },
+            "toDid": {
+              "type": "string",
+              "description": "aozora extension: the recipient's DID — the ONE piece of routing metadata that must stay visible, same as real Sealed Sender never hides the recipient either"
+            },
+            "ciphertext": {
+              "type": "string",
+              "description": "aozora extension: JSON-stringified yoro-ui.interop.signal envelope, with senderDid embedded in the encrypted payload"
+            },
+            "createdAt": { "type": "string" }
+          },
+          "required": ["convoId", "toDid", "ciphertext"]
+        }
+      },
+      "output": {
+        "encoding": "application/json",
+        "schema": {
+          "type": "object",
+          "properties": {
+            "rkey": { "type": "string" },
+            "uri": { "type": "string", "format": "at-uri" },
+            "cid": { "type": "string", "format": "cid" }
+          },
+          "required": ["rkey", "uri", "cid"]
+        }
+      }
+    }
+  }
+}
