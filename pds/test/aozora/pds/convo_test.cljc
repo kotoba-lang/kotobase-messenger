@@ -66,6 +66,30 @@
                    (is (str/includes? (tx-record-json @tx) "\"encryption\":\"e2ee\""))))
           (.finally (fn [] (set! kc/transact orig) (done)))))))
 
+(deftest send-message-rkeys-dont-collide-on-rapid-back-to-back-calls
+  (testing "two send-message calls fired without awaiting the first (the
+            exact double-send/retry-without-cancel shape that used to
+            collide on (.getTime (js/Date.)) alone -- create-record is
+            upsert-by-(collection,rkey), so a colliding rkey silently
+            drops the first message) must produce DIFFERENT rkeys, and
+            therefore land as two separate records, not one overwrite"
+    (async done
+      (let [txs (atom [])
+            orig kc/transact]
+        (set! kc/transact (fn
+                            ([_ _ tx] (swap! txs conj tx) (js/Promise.resolve #js {}))
+                            ([_ _ tx _] (swap! txs conj tx) (js/Promise.resolve #js {}))))
+        (-> (js/Promise.all
+             #js [(convo/send-message nil "yoro-social"
+                                      {:_auth-did "did:web:alice" :convoId "convo-1" :text "first"})
+                  (convo/send-message nil "yoro-social"
+                                      {:_auth-did "did:web:alice" :convoId "convo-1" :text "second"})])
+            (.then (fn [_]
+                     (is (= 2 (count @txs)) "both sends actually attempted a write")
+                     (let [rkeys (map #(.-rkey (js/JSON.parse (tx-record-json %))) @txs)]
+                       (is (apply not= rkeys) "the two rkeys must differ"))))
+            (.finally (fn [] (set! kc/transact orig) (done))))))))
+
 (deftest send-sealed-message-persists-under-neutral-mailbox-repo-without-sender-did
   (async done
     (let [tx (atom nil)
@@ -169,6 +193,27 @@
                    (is (str/includes? @tx ":atproto.record/collection \"app.aozora.convo.convo\""))
                    (is (str/includes? (tx-record-json @tx) "\"encryption\":\"e2ee\""))))
           (.finally (fn [] (set! kc/transact orig) (done)))))))
+
+(deftest create-convo-generated-ids-dont-collide-on-rapid-back-to-back-calls
+  (testing "same underlying defect as send-message's rkey (both used to be
+            (.getTime (js/Date.)) alone) -- two createConvo calls with no
+            convoId, fired without awaiting the first, must not silently
+            upsert-overwrite each other's convo metadata under the same
+            generated convoId"
+    (async done
+      (let [txs (atom [])
+            orig kc/transact]
+        (set! kc/transact (fn
+                            ([_ _ tx] (swap! txs conj tx) (js/Promise.resolve #js {}))
+                            ([_ _ tx _] (swap! txs conj tx) (js/Promise.resolve #js {}))))
+        (-> (js/Promise.all
+             #js [(convo/create-convo nil "yoro-social"
+                                      {:_auth-did "did:web:alice" :kind "dm" :members ["did:web:bob"]})
+                  (convo/create-convo nil "yoro-social"
+                                      {:_auth-did "did:web:alice" :kind "dm" :members ["did:web:carol"]})])
+            (.then (fn [[res1 res2]]
+                     (is (not= (:convoId res1) (:convoId res2)))))
+            (.finally (fn [] (set! kc/transact orig) (done))))))))
 
 (deftest update-convo-renames-and-preserves-other-fields
   (async done

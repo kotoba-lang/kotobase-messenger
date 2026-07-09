@@ -14,6 +14,29 @@
 (defn- non-blank [s] (when (and (string? s) (seq s)) s))
 (defn- now-iso [] (.toISOString (js/Date.)))
 
+(defn- random-hex-suffix
+  "4 random bytes -> 8 lowercase hex chars, to disambiguate an rkey
+  otherwise built from `(.getTime (js/Date.))` alone -- millisecond
+  resolution, so two calls in the same JS tick (a client that fires two
+  sends without awaiting the first, e.g. paste-and-hit-enter-twice, or a
+  retry-on-timeout that doesn't cancel the original request) would
+  otherwise generate the SAME rkey. Not a security nonce -- collision
+  odds only need to be negligible for this purpose, not cryptographic."
+  []
+  (let [bytes (js/Uint8Array. 4)]
+    (.getRandomValues js/crypto bytes)
+    (apply str (map (fn [b] (let [h (.toString b 16)] (if (= 1 (count h)) (str "0" h) h)))
+                    (array-seq bytes)))))
+
+(defn- unique-rkey
+  "A timestamp-prefixed rkey that can't collide across two calls in the
+  same JS millisecond (see random-hex-suffix) -- the timestamp prefix is
+  kept for readability/rough chronological grouping, but nothing in this
+  codebase sorts BY rkey (message/convo ordering is by the separate
+  :createdAt field, aozora.appview.convo), so the suffix is safe to add."
+  []
+  (str (.getTime (js/Date.)) "-" (random-hex-suffix)))
+
 (defn- require-auth [input]
   (or (non-blank (:_auth-did input))
       (non-blank (:repo input))))
@@ -63,7 +86,7 @@
   [client db {:keys [kind title members createdAt convoId encryption _env] :as input}]
   (let [repo-id (require-auth input)
         convo-id (or (non-blank convoId)
-                     (str "convo-" (.getTime (js/Date.))))
+                     (str "convo-" (unique-rkey)))
         rkey convo-id
         value (cond-> {:convoId convo-id
                        :kind (or kind "dm")
@@ -154,7 +177,7 @@
   too)."
   [client db {:keys [convoId text facets embed kind contentType replyTo encryption createdAt _env] :as input}]
   (let [sender (require-auth input)
-        rkey (str (.getTime (js/Date.)))
+        rkey (unique-rkey)
         value (cond-> {:convoId convoId
                        :senderDid sender
                        :text text
