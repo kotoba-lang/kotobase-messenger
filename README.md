@@ -22,6 +22,11 @@ library, per ADR-2607092345.
   definitions for every NSID the code above implements. Kept alongside the
   implementation deliberately: a consumer needs both the wire format and the
   handler code, and the spec should never drift from what actually ships.
+- `ui/src/yoro_ui/{pages/{convo,convo_detail},state/{convos,convo_search,
+  blocks},interop/{signal,signal_group}}.cljc` — the Reagent/re-frame
+  frontend: the conversation list + detail pages, their re-frame state
+  (including E2E-safe search that never scans raw ciphertext), and the
+  Signal-protocol session/group interop the UI drives directly.
 
 Every `(ns ...)` form is **unchanged** from its original app-aozora location
 — this is a pure relocation, not a rewrite or a rename. Any consumer that
@@ -45,11 +50,12 @@ by every collection type in that app, not just the messenger:
 - `aozora.appview.{feed,scan}` (the shared kotobase-scan substrate)
 
 A consuming app's shadow-cljs build adds this repo's `pds/src` + `appview/src`
-(and, once Phase B lands, `ui/src`) to its own `:source-paths` alongside its
-own copies of the namespaces above — the same relative-source-path pattern
++ `ui/src` to its own `:source-paths`/`deps.edn` paths alongside its own
+copies of the namespaces above — the same relative-source-path pattern
 `kotoba-lang/org-signal` already established for the crypto layer. See
-`gftdcojp/app-aozora`'s `40-engine/cljs/shadow-cljs.edn` for a working example
-once wired.
+`gftdcojp/app-aozora`'s `40-engine/cljs/shadow-cljs.edn` (backend) and
+`60-apps/appview/cljs/deps.edn` (frontend, `:deps true` in that dir's
+`shadow-cljs.edn` defers entirely to `deps.edn`) for working examples.
 
 ## Testing
 

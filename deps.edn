@@ -1,6 +1,6 @@
-{:paths ["pds/src" "appview/src"]
+{:paths ["pds/src" "appview/src" "ui/src"]
  :aliases
  {:lint
   {:replace-deps {clj-kondo/clj-kondo {:mvn/version "2024.11.14"}}
    :main-opts ["-m" "clj-kondo.main" "--lang" "cljs" "--fail-level" "error" "--lint"
-               "pds/src" "pds/test" "appview/src" "appview/test"]}}}
+               "pds/src" "pds/test" "appview/src" "appview/test" "ui/src" "ui/test"]}}}
