@@ -3,7 +3,7 @@
   UI — same reagent.dom.server/render-to-static-markup + hand-seeded
   re-frame db approach as yoro-ui.pages.convo-detail-test/settings-test."
   (:require [cljs.test :refer-macros [deftest is]]
-            [clojure.string :as str]
+            [kotoba.lang.text :as str]
             [reagent.dom.server :as rdom-server]
             [re-frame.core :as rf]
             [re-frame.db :as db]

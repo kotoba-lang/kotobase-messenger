@@ -1,6 +1,6 @@
 (ns aozora.pds.prekeys-test
   (:require [cljs.test :refer-macros [deftest is async]]
-            [clojure.string :as str]
+            [kotoba.lang.text :as str]
             [kotobase.client :as kc]
             [aozora.appview.prekeys :as appview-prekeys]
             [aozora.pds.prekeys :as prekeys]))

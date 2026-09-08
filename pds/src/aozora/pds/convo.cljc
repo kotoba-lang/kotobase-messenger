@@ -4,7 +4,7 @@
   Conversations are stored as generic AT records under `app.aozora.convo.*`
   collections so AppView can project them without introducing a second storage
   path."
-  (:require [clojure.string :as str]
+  (:require [kotoba.lang.text :as str]
             [aozora.pds.repo :as repo]
             [aozora.pds.push :as push]
             [aozora.appview.convo :as appview-convo]

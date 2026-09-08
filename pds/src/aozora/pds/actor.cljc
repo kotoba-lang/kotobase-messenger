@@ -2,7 +2,7 @@
   "app.aozora.actor.* write handlers — actor-to-actor relationships
   (currently just block), as opposed to aozora.pds.convo's actor-to-
   conversation ones."
-  (:require [clojure.string :as str]
+  (:require [kotoba.lang.text :as str]
             [aozora.pds.repo :as repo]))
 
 (defn- non-blank [s] (when (and (string? s) (seq s)) s))

@@ -1,6 +1,6 @@
 (ns aozora.pds.convo-test
   (:require [cljs.test :refer-macros [deftest is testing async]]
-            [clojure.string :as str]
+            [kotoba.lang.text :as str]
             [kotobase.client :as kc]
             [aozora.appview.convo :as appview-convo]
             [aozora.appview.actor :as appview-actor]

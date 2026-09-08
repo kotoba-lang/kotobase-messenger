@@ -23,7 +23,7 @@
   of loading the app on a new browser. Rotating the SAME identityKey's
   signedPreKey (the normal 7-day rotation in yoro-ui.interop.signal/
   ensure-identity!) is always allowed — same device, same identity, no risk."
-  (:require [clojure.string :as str]
+  (:require [kotoba.lang.text :as str]
             [aozora.pds.repo :as repo]
             [aozora.appview.prekeys :as appview-prekeys]
             [aozora.pds.per-actor :as per-actor]))

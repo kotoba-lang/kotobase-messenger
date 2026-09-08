@@ -9,7 +9,7 @@
   :convo/encrypt-and-send! fx stubbed via the registrar so these stay
   hermetic — no network, no real ratchet consumption."
   (:require [cljs.test :refer-macros [deftest is testing]]
-            [clojure.string :as str]
+            [kotoba.lang.text :as str]
             [reagent.dom.server :as rdom-server]
             [re-frame.core :as rf]
             [re-frame.db :as db]

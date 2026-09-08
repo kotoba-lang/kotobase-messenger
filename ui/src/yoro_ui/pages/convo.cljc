@@ -1,6 +1,6 @@
 (ns yoro-ui.pages.convo
   "Convo (DM) list page — port of svelte routes/convo/+page.svelte."
-  (:require [clojure.string :as str]
+  (:require [kotoba.lang.text :as str]
             [reagent.core :as r]
             [re-frame.core :as rf]
             [yoro-ui.router :as router]
