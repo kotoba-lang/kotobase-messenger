@@ -5,7 +5,7 @@
   any qualified var, restore once the whole async chain settles (not with
   with-redefs, which unwinds before the .then chain resolves)."
   (:require [cljs.test :refer-macros [deftest is async]]
-            [clojure.string :as str]
+            [kotoba.lang.text :as str]
             [yoro-ui.interop.signal :as signal]
             [yoro-ui.interop.actor-key :as ak]
             [yoro-ui.interop.atproto :as at]

@@ -11,7 +11,7 @@
      who wrote it, so a stranger could self-write a membership claim under
      their own repo and have it counted as real."
   (:require [cljs.test :refer-macros [deftest is async]]
-            [clojure.string :as str]
+            [kotoba.lang.text :as str]
             [kotobase.client :as kc]
             [aozora.appview.convo :as convo]))
 

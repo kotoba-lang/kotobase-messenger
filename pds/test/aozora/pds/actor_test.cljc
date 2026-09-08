@@ -1,6 +1,6 @@
 (ns aozora.pds.actor-test
   (:require [cljs.test :refer-macros [deftest is async]]
-            [clojure.string :as str]
+            [kotoba.lang.text :as str]
             [kotobase.client :as kc]
             [aozora.pds.actor :as actor]))
 

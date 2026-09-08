@@ -20,7 +20,7 @@
   UI to that existing (unencrypted) contract rather than expanding it."
   (:require [reagent.core :as r]
             [re-frame.core :as rf]
-            [clojure.string :as str]
+            [kotoba.lang.text :as str]
             [yoro-ui.router :as router]
             [yoro-ui.interop.atproto :as at]
             [yoro-ui.interop.signal :as signal]
@@ -758,9 +758,9 @@
 (defn- filter-messages-by-query [messages decrypted query]
   (if (str/blank? query)
     messages
-    (let [q (str/lower-case query)]
+    (let [q (str/lower query)]
       (filter #(when-let [t (searchable-text % decrypted)]
-                 (str/includes? (str/lower-case t) q))
+                 (str/includes? (str/lower t) q))
               messages))))
 
 (defn- attachment-chip [{:keys [uri contentType]}]

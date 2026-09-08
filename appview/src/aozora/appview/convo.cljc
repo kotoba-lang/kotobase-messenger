@@ -3,7 +3,7 @@
 
   Messenger state is projected from the same kotobase scan as the social feed,
   but filtered by explicit convo collections."
-  (:require [clojure.string :as str]
+  (:require [kotoba.lang.text :as str]
             [aozora.appview.scan :as scan]
             [aozora.appview.feed :as feed]))
 

@@ -3,7 +3,7 @@
   aozora.appview.convo-test's record-datoms/with-datoms fixture pattern
   (same feed/scan-yoro substrate)."
   (:require [cljs.test :refer-macros [deftest is async]]
-            [clojure.string :as str]
+            [kotoba.lang.text :as str]
             [kotobase.client :as kc]
             [aozora.appview.actor :as actor]))
 

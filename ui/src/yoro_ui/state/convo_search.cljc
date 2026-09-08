@@ -21,7 +21,7 @@
   much plaintext ends up cached on this device beyond what the user
   actually chose to open. This is the same trade Signal's own search
   makes (local-database-only, never a network replay-decrypt)."
-  (:require [clojure.string :as str]
+  (:require [kotoba.lang.text :as str]
             [re-frame.core :as rf]
             [yoro-ui.interop.signal :as signal]
             [yoro-ui.interop.signal-group :as signal-group]))
@@ -33,7 +33,7 @@
  (fn [db [_ q]] (assoc-in db [:convo-search :query] q)))
 
 (defn- includes-ci? [haystack needle]
-  (str/includes? (str/lower-case (or haystack "")) needle))
+  (str/includes? (str/lower (or haystack "")) needle))
 
 (defn- convo-display-name [c my-did]
   (let [peer (first (remove #(= (:did %) my-did) (:members c)))
@@ -56,7 +56,7 @@
 (rf/reg-sub
  :convo-search/matching-convos
  (fn [db _]
-   (let [q (str/lower-case (str/trim (get-in db [:convo-search :query] "")))
+   (let [q (str/lower (str/trim (get-in db [:convo-search :query] "")))
          my-did (get-in db [:auth :session :did])
          convos (get-in db [:convos :list] [])]
      (if (empty? q)
@@ -66,7 +66,7 @@
 (rf/reg-sub
  :convo-search/matching-messages
  (fn [db _]
-   (let [q (str/lower-case (str/trim (get-in db [:convo-search :query] "")))
+   (let [q (str/lower (str/trim (get-in db [:convo-search :query] "")))
          decrypted (get-in db [:convo :decrypted] {})
          by-convo (get-in db [:convo :messages-by-convo] {})
          convos-by-id (into {} (map (juxt :id identity)) (get-in db [:convos :list] []))
