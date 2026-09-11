@@ -66,7 +66,7 @@ graph for zero real benefit today (app-aozora is the only consumer). Once
 this repo's source-path is added to a consumer's shadow-cljs build, its
 `*_test.cljc` files (matching that build's `-test$` `ns-regexp`) run
 automatically as part of that consumer's own test suite — no extra wiring
-needed. CI here only runs `clj-kondo` (`clojure -M:lint`), which catches
+needed. CI here only runs `clj-kondo` (`kbb -M:lint`), which catches
 syntax/style issues without needing the full dependency graph. Revisit a
 standalone harness if/when a second real consumer exists.
 
