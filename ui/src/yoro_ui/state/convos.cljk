@@ -5,7 +5,7 @@
    PDS directly for list/detail projections; it asks the AppView for the
    projected convo feed and unread counts.
 
-   svelte の教訓 (CLAUDE.md §Messages Page): reload() を getSession() でガードすると本番で
+   svelte の教訓 (AGENTS.md §Messages Page): reload() を getSession() でガードすると本番で
    session が常に nil となりスケルトンが永続化する。よって session ゲートはせず直接 XRPC を
    呼び、失敗時は :error 状態へ遷移する."
   (:require [re-frame.core :as rf]))
