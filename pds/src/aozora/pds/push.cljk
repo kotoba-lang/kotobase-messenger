@@ -100,7 +100,14 @@
   roster (would leak sealed-sender's whole point — who's in the convo — into
   a code path that only needs to know one already-explicit recipient); the
   push body stays as generic as the regular path's, never hinting a sender.
-  Same fire-and-forget/never-rejects contract as notify-new-message!."
+  Same fire-and-forget/never-rejects contract as notify-new-message!.
+
+  Called ONLY for intro-route (toDid-addressed) sealed messages. Mailbox-
+  route messages (ADR-2610081200 R1 — addressed by an opaque session mailbox
+  id) are deliberately NOT pushed: resolving a mailbox id to a push
+  subscription would need a stored mailbox→DID mapping, which is exactly
+  the linkage that route exists to avoid. Recipients poll
+  listSealedMessages for them instead."
   [^js env {:keys [convo-id to-did]}]
   (let [vapid (vapid-config env)]
     (if (nil? vapid)

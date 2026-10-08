@@ -278,6 +278,65 @@
                         "the projection has no senderDid key to leak in the first place")
                     (done)))))))
 
+;; ── mailbox route (ADR-2610081200 R1) ─────────────────────────────────────
+
+(def ^:private mb-bob "bobMailboxIdAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA")
+(def ^:private mb-alice "aliceMailboxIdAAAAAAAAAAAAAAAAAAAAAAAAAAAAA")
+
+(def ^:private mixed-sealed-datoms
+  [(record-datoms "s1" "app.aozora.convo.sealedMessage" "mailbox"
+                  {:convoId "convo-1" :toDid "did:web:bob" :ciphertext "intro" :createdAt "2026-07-01T00:00:00Z"})
+   (record-datoms "s2" "app.aozora.convo.sealedMessage" "mailbox"
+                  {:mailboxId mb-bob :ciphertext "mb-to-bob" :createdAt "2026-07-01T00:01:00Z"})
+   (record-datoms "s3" "app.aozora.convo.sealedMessage" "mailbox"
+                  {:mailboxId mb-alice :ciphertext "mb-to-alice" :createdAt "2026-07-01T00:02:00Z"})])
+
+(deftest list-sealed-messages-by-mailbox-ids-returns-mailbox-id-not-to-did
+  (async done
+    (with-datoms
+      mixed-sealed-datoms
+      #(-> (convo/list-sealed-messages nil db-name {:mailboxIds [mb-bob]})
+           (.then (fn [{:keys [messages]}]
+                    (is (= ["mb-to-bob"] (mapv :ciphertext messages))
+                        "only the record in the requested mailbox, not the intro or the other direction")
+                    (is (= mb-bob (:mailboxId (first messages))))
+                    (is (not (contains? (first messages) :toDid)) "a mailbox row has no toDid to return")
+                    (is (not (contains? (first messages) :convoId)) "nor a convoId")
+                    (done)))))))
+
+(deftest list-sealed-messages-accepts-comma-joined-mailbox-ids
+  (async done
+    (with-datoms
+      mixed-sealed-datoms
+      #(-> (convo/list-sealed-messages nil db-name {:mailboxIds (str mb-bob "," mb-alice)})
+           (.then (fn [{:keys [messages]}]
+                    (is (= ["mb-to-bob" "mb-to-alice"] (mapv :ciphertext messages))
+                        "a GET query string carries several ids comma-joined in one parameter")
+                    (done)))))))
+
+(deftest list-sealed-messages-by-to-did-excludes-mailbox-records
+  (async done
+    (with-datoms
+      mixed-sealed-datoms
+      #(-> (convo/list-sealed-messages nil db-name {:toDid "did:web:bob"})
+           (.then (fn [{:keys [messages]}]
+                    (is (= ["intro"] (mapv :ciphertext messages))
+                        "toDid finds only intro-route records; mailbox records are not addressable by DID")
+                    (done)))))))
+
+(deftest list-sealed-messages-unknown-or-empty-mailbox-ids-return-nothing
+  (async done
+    (with-datoms
+      mixed-sealed-datoms
+      #(-> (js/Promise.all
+            #js [(convo/list-sealed-messages nil db-name {:mailboxIds ["nobodyMailboxIdAAAAAAAAAAAAAAAAAAAAAAAAAAAA"]})
+                 (convo/list-sealed-messages nil db-name {:mailboxIds []})
+                 (convo/list-sealed-messages nil db-name {:mailboxIds ""})])
+           (.then (fn [^js rs]
+                    (is (every? (fn [r] (empty? (:messages r))) (array-seq rs))
+                        "an unknown id, or no ids at all, never falls back to listing every mailbox")
+                    (done)))))))
+
 (deftest list-convos-includes-callers-own-preference
   (async done
     (with-datoms

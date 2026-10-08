@@ -394,27 +394,61 @@
                                       (take lim)
                                       (mapv #(select-keys % [:convoId :toDid :fromDid :text :contentType :encryption :createdAt])))})))))
 
+(def ^:private max-mailbox-ids
+  "Upper bound on mailboxIds per listSealedMessages call — one id per open
+  session is the expected shape; this only stops an unbounded filter set."
+  64)
+
+(defn- mailbox-id-set
+  "listSealedMessages' `mailboxIds` → set of non-blank ids. Accepts a vector
+  (direct handler call / JSON) or a single string, comma-separated for
+  several: the AppView router's GET parse-input keeps only the LAST value
+  of a repeated query key, so a repeated `mailboxIds=` would silently drop
+  all but one (base64url ids never contain a comma)."
+  [mailbox-ids]
+  (->> (cond
+         (string? mailbox-ids) (str/split mailbox-ids #",")
+         (sequential? mailbox-ids) mailbox-ids
+         :else [])
+       (filter string?)
+       (map str/trim)
+       (remove str/blank?)
+       (take max-mailbox-ids)
+       set))
+
 (defn list-sealed-messages
-  "app.aozora.convo.sealedMessage records addressed to `toDid` — sorted
-  oldest-first like list-messages, but the caller (yoro-ui.interop.signal)
-  must decrypt each `ciphertext` to learn the sender and the actual content;
-  nothing here reveals either server-side. toDid is REQUIRED (unlike the
-  regular listMessages' convoId-only filter) — every sealedMessage record is
-  written under the same shared mailbox-repo, so scanning by convoId alone
-  would return every sealed DM ever sent in that convo to ANY recipient, not
-  just the caller's own."
-  [client db-name {:keys [convoId toDid limit]}]
-  (let [lim (clamp (or limit 50) 1 200)]
-    (if (str/blank? (or toDid ""))
+  "app.aozora.convo.sealedMessage records for the caller — sorted
+  oldest-first like list-messages; the caller (yoro-ui.interop.signal) must
+  decrypt each `ciphertext` to learn the sender and the actual content.
+
+  Two selectors, either or both (results are the union):
+  - `toDid` (+ optional `convoId`): intro-route records (the
+    session-establishing message), which carry toDid in the clear.
+  - `mailboxIds`: mailbox-route records (ADR-2610081200 R1), which carry
+    only an opaque session mailbox id — no toDid, no convoId. The view
+    returns `mailboxId` (never `toDid`) for these. `convoId` does not
+    filter them (they have none in the clear).
+
+  With neither selector the result is empty, not every sealed message ever
+  stored (every sealedMessage record lives under the same shared
+  mailbox-repo). Nothing is persisted about who asked for which mailbox id;
+  the AppView sees that association only for the duration of the request."
+  [client db-name {:keys [convoId toDid mailboxIds limit]}]
+  (let [lim (clamp (or limit 50) 1 200)
+        to-did (when-not (str/blank? (or toDid "")) toDid)
+        mids (mailbox-id-set mailboxIds)]
+    (if (and (nil? to-did) (empty? mids))
       (js/Promise.resolve {:messages []})
       (-> (feed/scan-yoro client db-name)
           (.then (fn [{:keys [records]}]
                    {:messages (->> (sealed-message-records records)
-                                   (filter #(= toDid (:toDid %)))
-                                   (filter #(or (nil? convoId) (= convoId (:convoId %))))
+                                   (filter (fn [r]
+                                             (or (and to-did (= to-did (:toDid r))
+                                                      (or (nil? convoId) (= convoId (:convoId r))))
+                                                 (and (string? (:mailboxId r)) (contains? mids (:mailboxId r))))))
                                    (sort-by :createdAt)
                                    (take-last lim)
-                                   (mapv #(select-keys % [:convoId :rkey :toDid :ciphertext :createdAt])))}))))))
+                                   (mapv #(select-keys % [:convoId :rkey :toDid :mailboxId :ciphertext :createdAt])))}))))))
 
 (defn list-unread-counts [client db-name {:keys [did limit]}]
   (let [lim (clamp (or limit 50) 1 200)]

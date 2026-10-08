@@ -109,14 +109,16 @@
    :rootKey (b64u (:root-key state))
    :sendChainKey (b64u (:send-chain-key state)) :sendChainRemote (b64u (:send-chain-remote state))
    :recvChainKey (b64u (:recv-chain-key state)) :recvChainRemote (b64u (:recv-chain-remote state))
-   :sendN (:send-n state) :recvN (:recv-n state)})
+   :sendN (:send-n state) :recvN (:recv-n state)
+   :mailboxKey (b64u (:mailbox-key state))})
 
 (defn- stored->ratchet-state [stored]
   {:dh-priv (unb64u (:dhPriv stored)) :dh-pub (unb64u (:dhPub stored)) :dh-remote (unb64u (:dhRemote stored))
    :root-key (unb64u (:rootKey stored))
    :send-chain-key (unb64u (:sendChainKey stored)) :send-chain-remote (unb64u (:sendChainRemote stored))
    :recv-chain-key (unb64u (:recvChainKey stored)) :recv-chain-remote (unb64u (:recvChainRemote stored))
-   :send-n (or (:sendN stored) 0) :recv-n (or (:recvN stored) 0)})
+   :send-n (or (:sendN stored) 0) :recv-n (or (:recvN stored) 0)
+   :mailbox-key (unb64u (:mailboxKey stored))})
 
 (defn- load-session-state [my-did peer-did]
   (when-let [stored (json-get (session-key my-did peer-did))]
@@ -221,6 +223,61 @@
                      resp
                      (js/Promise.reject (js/Error. (str "signal: prekey bundle signature verification failed for " peer-did))))))))))
 
+;; ── session mailbox (ADR-2610081200 R1: accountability-tiered anonymity) ────
+;;
+;; A sealed message routed by `toDid` tells the storage/AppView layer who it
+;; is FOR. Once a session exists both parties hold the same X3DH shared
+;; secret SK, so they can agree on an opaque per-session, per-direction
+;; routing label instead — the server stores and lists by that label and
+;; never learns which DID it belongs to (beyond what it learns from the
+;; authenticated request itself, see listSealedMessages' description).
+;;
+;;   mailbox-key = HKDF-SHA256(ikm = SK, salt = 32 zero bytes,
+;;                             info = "aozora/mailbox/v1", L = 32)
+;;   mailbox-id(recipient-did) = base64url-unpadded(
+;;                 HMAC-SHA256(mailbox-key, "aozora/mailbox/v1|" ‖ recipient-did))
+;;
+;; mailbox-key is derived ONCE at session establishment (finish-initiator! /
+;; finish-responder!, the only two places SK exists) and persisted with the
+;; session state; the Double Ratchet never touches it, so it is stable for
+;; the session's whole life. The two directions get different ids (the
+;; recipient DID is in the HMAC input), so the A→B and B→A streams are not
+;; trivially linkable to each other by id equality either. A session created
+;; before this existed has no mailbox-key; send-sealed! then keeps using the
+;; toDid (intro) route for it — fail-visible, never a fabricated id.
+
+(def ^:private mailbox-info "aozora/mailbox/v1")
+
+(defn- derive-mailbox-key
+  "Promise<Uint8Array(32)> — HKDF-SHA256(sk, zero salt, mailbox-info) via
+  WebCrypto deriveBits."
+  [^js sk]
+  (-> (js/crypto.subtle.importKey "raw" sk "HKDF" false #js ["deriveBits"])
+      (.then (fn [k]
+               (js/crypto.subtle.deriveBits
+                #js {:name "HKDF" :hash "SHA-256" :salt (js/Uint8Array. 32)
+                     :info (kc/utf8->bytes mailbox-info)}
+                k 256)))
+      (.then #(js/Uint8Array. %))))
+
+(defn mailbox-id
+  "Promise<string> — the opaque mailbox id for messages addressed TO
+  `recipient-did` within the session whose mailbox key is `mailbox-key`
+  (Uint8Array(32)). Deterministic; both session parties compute the same
+  value for the same recipient, and a different one per direction."
+  [^js mailbox-key recipient-did]
+  (-> (kc/hmac-sha256 mailbox-key (kc/utf8->bytes (str mailbox-info "|" recipient-did)))
+      (.then cacao/bytes->base64url)))
+
+(defn session-mailbox-id
+  "Promise<string|nil> — mailbox-id for `recipient-did` (either my-did or
+  peer-did) in the stored (my-did, peer-did) session; nil when there is no
+  session or it predates mailbox keys."
+  [my-did peer-did recipient-did]
+  (if-let [k (:mailbox-key (load-session-state my-did peer-did))]
+    (mailbox-id k recipient-did)
+    (js/Promise.resolve nil)))
+
 ;; ── full X3DH root secret (kotoba.signal.x3dh) → kotoba.signal.ratchet bootstrap ──
 
 (defn- pick-opk
@@ -233,13 +290,17 @@
       {:pub (cacao/base64url->bytes (nth pool i)) :id i})))
 
 (defn- finish-initiator!
-  "Bootstrap init-sender from x3dh-initiate's result, persist, return the
-  live state (with :pending-first attached — see establish-as-initiator)."
+  "Bootstrap init-sender from x3dh-initiate's result, derive the session's
+  mailbox key from the same shared secret (derive-mailbox-key), persist,
+  return the live state (with :pending-first attached — see
+  establish-as-initiator)."
   [my-did peer-did bundle {:keys [shared-secret ek-pub opk-id]}]
   (let [peer-spk-pub (cacao/base64url->bytes (:signedPreKey bundle))]
-    (-> (ratchet/init-sender shared-secret peer-spk-pub)
-        (.then (fn [state]
-                 (let [state' (assoc state :pending-first
+    (-> (js/Promise.all #js [(ratchet/init-sender shared-secret peer-spk-pub)
+                             (derive-mailbox-key shared-secret)])
+        (.then (fn [^js pair]
+                 (let [state (assoc (aget pair 0) :mailbox-key (aget pair 1))
+                       state' (assoc state :pending-first
                                       {:ek (cacao/bytes->base64url ek-pub)
                                        :spkId (:signedPreKeyId bundle)
                                        :opkId opk-id})]
@@ -279,13 +340,16 @@
                        (.then #(finish-initiator! my-did peer-did bundle %)))))))))
 
 (defn- finish-responder!
-  "Bootstrap init-receiver from x3dh-respond's root secret, persist, return
-  the live state."
+  "Bootstrap init-receiver from x3dh-respond's root secret, derive the
+  session's mailbox key from the same secret (derive-mailbox-key), persist,
+  return the live state."
   [my-did peer-did spk-priv spk-pub root-secret]
-  (-> (ratchet/init-receiver root-secret {:priv spk-priv :pub spk-pub})
-      (.then (fn [state]
-               (store-session-state! my-did peer-did state)
-               state))))
+  (-> (js/Promise.all #js [(ratchet/init-receiver root-secret {:priv spk-priv :pub spk-pub})
+                           (derive-mailbox-key root-secret)])
+      (.then (fn [^js pair]
+               (let [state (assoc (aget pair 0) :mailbox-key (aget pair 1))]
+                 (store-session-state! my-did peer-did state)
+                 state)))))
 
 (defn- respond-x3dh
   "Promise<Uint8Array(32)> root secret — x3dh-respond against a verified
@@ -370,93 +434,145 @@
                                 (store-session-state! my-did peer-did state')
                                 (kc/bytes->utf8 pt))))))))))
 
+
 ;; ── sealed sending payload convention (Sealed Sender-equivalent) ────────────
 ;;
 ;; app.aozora.convo.sendSealed stores the record with NO plaintext senderDid
 ;; field, under a neutral non-attributing repo — see that lexicon's
 ;; description and aozora.pds.convo/send-sealed-message's docstring for the
-;; full design (a genuine Sealed-Sender-equivalent, not full conversation-
-;; graph anonymity: toDid, like a real push service the transport still has
-;; to route through, stays visible — same scope real Signal Sealed Sender
-;; has). This layer is a PAYLOAD-SHAPE convention on top of the SAME
+;; full design. This layer is a PAYLOAD-SHAPE convention on top of the SAME
 ;; signal-v3 encrypt-message/decrypt-message above, not a new crypto scheme:
-;; the sender's own DID rides INSIDE the already-E2E-encrypted JSON payload
-;; instead of as a plaintext record field, so only the one party who can
-;; decrypt it (the intended recipient, via their established ratchet
-;; session) ever learns who sent it.
+;; the sender's own DID (and, since R1, the convoId) ride INSIDE the
+;; already-E2E-encrypted JSON payload instead of as plaintext record fields,
+;; so only the one party who can decrypt it (the intended recipient, via
+;; their established ratchet session) ever learns who sent it.
 
 (defn encrypt-sealed-message
   "→ Promise<envelope-map> — same shape as encrypt-message's, but the
-  encrypted plaintext is {:senderDid my-did :text plaintext} JSON instead of
-  the bare text, so decrypt-sealed-message's caller learns the sender only
-  after decrypting."
-  [my-did peer-did plaintext]
-  (encrypt-message my-did peer-did (js/JSON.stringify #js {:senderDid my-did :text plaintext})))
+  encrypted plaintext is {:senderDid my-did :text plaintext [:convoId …]}
+  JSON instead of the bare text, so decrypt-sealed-message's caller learns
+  the sender (and convo) only after decrypting."
+  ([my-did peer-did plaintext] (encrypt-sealed-message my-did peer-did plaintext nil))
+  ([my-did peer-did plaintext convo-id]
+   (encrypt-message my-did peer-did
+                    (js/JSON.stringify (clj->js (cond-> {:senderDid my-did :text plaintext}
+                                                  convo-id (assoc :convoId convo-id)))))))
 
 (defn decrypt-sealed-message
-  "→ Promise<{:senderDid :text}> — decrypts exactly like decrypt-message,
-  then unwraps encrypt-sealed-message's JSON payload shape."
+  "→ Promise<{:senderDid :text [:convoId]}> — decrypts exactly like
+  decrypt-message, then unwraps encrypt-sealed-message's JSON payload shape."
   [my-did peer-did envelope]
   (-> (decrypt-message my-did peer-did envelope)
       (.then (fn [json-str] (js->clj (js/JSON.parse json-str) :keywordize-keys true)))))
 
 ;; ── sealed mailbox XRPC (app.aozora.convo.sendSealed / listSealedMessages) ──
 ;;
-;; fetch-sealed-messages! takes `peer-did` explicitly — receiving a sealed
-;; message REQUIRES already knowing who it's from, not the other way around.
-;; This is a real, deliberate scope boundary, not an oversight: sessions here
-;; are looked up by (my-did, peer-did) pair (load-session-state), the same
-;; way the regular (non-sealed) path always has been, and there is no
-;; cryptographic session-identification mechanism in this envelope format
-;; (unlike real Signal, whose Double Ratchet header ITSELF carries enough
-;; key material to identify a session without prior knowledge of the
-;; sender — adding that here would mean embedding raw identity-key bytes
-;; in first-message envelopes instead of relying on fetch-verified-bundle's
-;; DID-keyed lookup, a real protocol change, not a UI wiring change).
-;; So: sealed sending/receiving works WITHIN a conversation whose other
-;; party you already know (open a thread, then check for sealed messages
-;; from that specific peer) — it hides the sender from the STORAGE/AppView
-;; layer (anyone scanning app.aozora.convo.sealedMessage records), not from
-;; a recipient who's opened a chat with someone they already know. That is
-;; still the real, useful privacy property Sealed Sender is FOR (per-message
-;; transport/storage metadata, not "receive anonymous mail from strangers").
+;; Two routes (ADR-2610081200 R1):
+;;
+;;   intro   — the ONE session-establishing message (the envelope carrying
+;;             the X3DH header :ek). Routed by `toDid` + `convoId`, exactly
+;;             as before R1: the responder cannot compute the session
+;;             mailbox before decrypting this message, so it has to be
+;;             findable by DID. The intro record therefore STILL reveals
+;;             the recipient DID and convoId to the storage/AppView layer.
+;;             Also used for a legacy session that predates mailbox keys.
+;;   mailbox — every later sealed message. Routed by the opaque session
+;;             mailbox id for the recipient (see `mailbox-id`). The stored
+;;             record carries no toDid, no convoId (it is inside the
+;;             ciphertext) and no senderDid; its rkey is random. An
+;;             observer of the store sees only "something was posted to
+;;             mailbox X at time T".
+;;
+;; fetch-sealed-messages! still takes `peer-did` explicitly — receiving a
+;; sealed message REQUIRES already knowing who it's from: sessions are looked
+;; up by (my-did, peer-did) pair (load-session-state), and the mailbox id is a
+;; function of that pair's session. That is a deliberate scope boundary (this
+;; hides per-message metadata from storage/AppView, it is not "receive
+;; anonymous mail from strangers").
 
 (defn send-sealed!
   "Encrypt `plaintext` for `peer-did` (as the recipient) with the sender's
-  DID sealed inside the payload, then POST app.aozora.convo.sendSealed.
-  Establishes a session first if none exists, same as encrypt-message/
-  send-message. → Promise<xrpc-response>."
+  DID and `convo-id` sealed inside the payload, then POST
+  app.aozora.convo.sendSealed. Establishes a session first if none exists,
+  same as encrypt-message. The session-establishing message (envelope with
+  :ek) — or any message on a legacy session without a mailbox key — goes by
+  the intro route ({:toDid :convoId}); every other message goes by
+  {:mailboxId} only. → Promise<xrpc-response>."
   [my-did peer-did convo-id plaintext]
-  (-> (encrypt-sealed-message my-did peer-did plaintext)
+  (-> (encrypt-sealed-message my-did peer-did plaintext convo-id)
       (.then (fn [envelope]
-               (at/at-procedure "app.aozora.convo.sendSealed"
-                                {:convoId convo-id
-                                 :toDid peer-did
-                                 :ciphertext (js/JSON.stringify (clj->js envelope))})))))
+               (let [ciphertext (js/JSON.stringify (clj->js envelope))
+                     intro! #(at/at-procedure "app.aozora.convo.sendSealed"
+                                              {:convoId convo-id :toDid peer-did :ciphertext ciphertext})]
+                 (if (:ek envelope)
+                   (intro!)
+                   (-> (session-mailbox-id my-did peer-did peer-did)
+                       (.then (fn [mid]
+                                (if mid
+                                  (at/at-procedure "app.aozora.convo.sendSealed"
+                                                   {:mailboxId mid :ciphertext ciphertext})
+                                  (intro!)))))))))))
 
 (defn- decrypt-sealed-record
   "One listSealedMessages row → Promise<{:convoId :rkey :createdAt :senderDid
   :text} | nil>; nil (not a rejection) on a record this device can't
-  decrypt (e.g. genuinely corrupt, or addressed to a DIFFERENT session than
-  the one `peer-did` names). A mailbox listing should show what it CAN
-  decrypt, not fail the whole page over one bad row."
+  decrypt (e.g. already consumed by an earlier fetch, genuinely corrupt, or
+  addressed to a DIFFERENT session than the one `peer-did` names). A mailbox
+  listing should show what it CAN decrypt, not fail the whole page over one
+  bad row. convoId comes from the decrypted payload when present (mailbox
+  records carry none in the clear), else from the intro record."
   [my-did peer-did record]
-  (let [envelope (js->clj (js/JSON.parse (:ciphertext record)) :keywordize-keys true)]
-    (-> (decrypt-sealed-message my-did peer-did envelope)
-        (.then (fn [{:keys [senderDid text]}]
-                 {:convoId (:convoId record) :rkey (:rkey record) :createdAt (:createdAt record)
-                  :senderDid senderDid :text text}))
-        (.catch (fn [_] nil)))))
+  (-> (js/Promise.resolve nil)
+      (.then (fn [_] (js->clj (js/JSON.parse (:ciphertext record)) :keywordize-keys true)))
+      (.then #(decrypt-sealed-message my-did peer-did %))
+      (.then (fn [{:keys [senderDid text convoId]}]
+               {:convoId (or convoId (:convoId record)) :rkey (:rkey record) :createdAt (:createdAt record)
+                :senderDid senderDid :text text}))
+      (.catch (fn [_] nil))))
+
+(defn- decrypt-sealed-records-in-order
+  "Decrypt `records` ONE AT A TIME, oldest first — the ratchet advances one
+  step per message and decrypt-message reads the stored session state at
+  call time, so concurrent decrypts would all start from the same state.
+  → Promise<[result-or-nil …]>."
+  [my-did peer-did records]
+  (reduce (fn [p record]
+            (.then p (fn [acc]
+                       (.then (decrypt-sealed-record my-did peer-did record) #(conj acc %)))))
+          (js/Promise.resolve [])
+          (sort-by :createdAt records)))
 
 (defn fetch-sealed-messages!
-  "GET app.aozora.convo.listSealedMessages for `my-did`, scoped to
-  `convo-id`, decrypt every row assuming it's from `peer-did` (best-effort —
-  see decrypt-sealed-record), drop the ones that failed. → Promise<[{:convoId
-  :rkey :createdAt :senderDid :text} …]>, oldest first (matches
-  listMessages' ordering). See the ns section comment above for why
-  `peer-did` must already be known — this is not a blind inbox scan."
+  "Fetch and decrypt the sealed messages `peer-did` sent to `my-did`:
+    1. the intro route — listSealedMessages {:toDid my-did :convoId convo-id};
+       decrypting the session-establishing message here creates the session
+       (and its mailbox key) if this device didn't have one yet;
+    2. the mailbox route — listSealedMessages {:mailboxIds <id for my-did in
+       the (my-did, peer-did) session>}, once a session with a mailbox key
+       exists.
+  Both are decrypted strictly in order (intro first, then mailbox), merged,
+  and dropped where decryption failed. Mailbox records carry no convoId in
+  the clear, so convo scoping happens after decryption: rows whose sealed
+  payload names a different convoId are omitted (pass convo-id nil to get
+  every message from this peer — the session, and therefore the ratchet, is
+  per peer pair, not per convo, so a row consumed here can't be decrypted
+  again later). → Promise<[{:convoId :rkey :createdAt :senderDid :text} …]>,
+  oldest first."
   [my-did peer-did convo-id]
-  (-> (at/at-appview-query "app.aozora.convo.listSealedMessages" {:toDid my-did :convoId convo-id})
-      (.then (fn [{:keys [messages]}]
-               (js/Promise.all (into-array (map #(decrypt-sealed-record my-did peer-did %) messages)))))
-      (.then (fn [^js results] (vec (remove nil? (array-seq results)))))))
+  (-> (at/at-appview-query "app.aozora.convo.listSealedMessages"
+                           (cond-> {:toDid my-did} convo-id (assoc :convoId convo-id)))
+      (.then (fn [{:keys [messages]}] (decrypt-sealed-records-in-order my-did peer-did messages)))
+      (.then (fn [intro-results]
+               (-> (session-mailbox-id my-did peer-did my-did)
+                   (.then (fn [mid]
+                            (if mid
+                              (-> (at/at-appview-query "app.aozora.convo.listSealedMessages" {:mailboxIds mid})
+                                  (.then (fn [{:keys [messages]}]
+                                           (decrypt-sealed-records-in-order my-did peer-did messages))))
+                              [])))
+                   (.then (fn [mailbox-results]
+                            (->> (concat intro-results mailbox-results)
+                                 (remove nil?)
+                                 (filter #(or (nil? convo-id) (= convo-id (:convoId %))))
+                                 (sort-by :createdAt)
+                                 vec))))))))

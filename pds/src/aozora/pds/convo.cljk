@@ -270,38 +270,98 @@
   sender. See sendSealed's lexicon description for the full design."
   "mailbox")
 
-(defn send-sealed-message
-  "POST app.aozora.convo.sendSealed.
+(def ^:private mailbox-id-re
+  "A session mailbox id is base64url-unpadded HMAC-SHA256 output
+  (yoro-ui.interop.signal/mailbox-id) — exactly 43 chars of [A-Za-z0-9_-].
+  Enforcing the shape keeps a client from smuggling a DID (or anything else
+  with `:`/`.`) into the field that is supposed to be opaque."
+  #"^[A-Za-z0-9_-]{43}$")
 
-  Persists one sender-metadata-sealed message under `mailbox-repo`, keyed by
-  `toDid` (rkey collisions across different senders are expected and fine —
-  mailbox-repo is shared by design, so rkey includes toDid + a timestamp
-  instead of the usual sender-scoped convention). Still requires a valid
-  session (require-auth) — authentication and attribution are deliberately
-  separate; the caller's identity is checked but never stored. Fires a
-  best-effort push directly to toDid (see aozora.pds.push/
-  notify-sealed-message! for why this doesn't resolve a convo-member roster
-  the way send-message's push does)."
-  [client db {:keys [convoId toDid ciphertext createdAt _env] :as input}]
-  (let [sender (require-auth input)
-        rkey (str "sealed-" toDid "-" (.getTime (js/Date.)))
+(defn- sealed-route
+  "Classify a sendSealed input: [:intro] (toDid only), [:mailbox] (mailboxId
+  only), or [:invalid message] (both, neither, or a malformed mailboxId)."
+  [{:keys [convoId toDid mailboxId]}]
+  (let [to? (not (str/blank? (or toDid "")))
+        mb? (not (str/blank? (or mailboxId "")))]
+    (cond
+      (and to? mb?) [:invalid "exactly one of toDid or mailboxId, not both"]
+      (and (not to?) (not mb?)) [:invalid "exactly one of toDid or mailboxId is required"]
+      (and to? (str/blank? (or convoId ""))) [:invalid "convoId is required with toDid"]
+      (and mb? (not (re-matches mailbox-id-re mailboxId))) [:invalid "mailboxId must be a 43-char base64url session mailbox id"]
+      to? [:intro]
+      :else [:mailbox])))
+
+(defn- write-sealed! [client db value rkey]
+  (create client db mailbox-repo "app.aozora.convo.sealedMessage" value rkey))
+
+(defn- send-sealed-intro
+  [client db {:keys [convoId toDid ciphertext createdAt _env]} sender]
+  (let [rkey (str "sealed-" (unique-rkey))
         value {:convoId convoId
                :toDid toDid
                :ciphertext ciphertext
                :rkey rkey
                :createdAt (or createdAt (now-iso))}]
-    (if (or (nil? sender) (str/blank? (or convoId "")) (str/blank? (or toDid ""))
-            (str/blank? (or ciphertext "")))
+    (-> (actor-blocked? _env toDid sender)
+        (.then (fn [blocked?]
+                 (if blocked?
+                   {:error "Blocked" :message "this actor is not accepting messages from you"}
+                   (-> (write-sealed! client db value rkey)
+                       (.then (fn [r]
+                                (push/notify-sealed-message! _env {:convo-id convoId :to-did toDid})
+                                (assoc r :convoId convoId))))))))))
+
+(defn- send-sealed-mailbox
+  [client db {:keys [mailboxId ciphertext createdAt]}]
+  (let [rkey (str "sealed-" (unique-rkey))
+        value {:mailboxId mailboxId
+               :ciphertext ciphertext
+               :rkey rkey
+               :createdAt (or createdAt (now-iso))}]
+    (-> (write-sealed! client db value rkey)
+        (.then (fn [r] (assoc r :mailboxId mailboxId))))))
+
+(defn send-sealed-message
+  "POST app.aozora.convo.sendSealed.
+
+  Persists one sender-metadata-sealed message under `mailbox-repo`. The
+  caller's identity is checked (require-auth) but never stored —
+  authentication and attribution are deliberately separate. Exactly one
+  route (sealed-route; both/neither is InvalidRequest):
+
+  - intro (`toDid` + `convoId`): the session-establishing message, which the
+    recipient must be able to find by DID before it has a session. Stored
+    WITH toDid and convoId — the recipient is visible for this one record,
+    the same scope as before ADR-2610081200 R1. Block-checked against toDid
+    and pushed to toDid (aozora.pds.push/notify-sealed-message!).
+  - mailbox (`mailboxId`): every later message in an established session.
+    Stored with ONLY {mailboxId ciphertext rkey createdAt} — no toDid, no
+    convoId (a convoId would link back to the convo's public member list;
+    the client seals it inside the ciphertext instead; one sent here is
+    dropped, not stored), no senderDid. The server cannot know the
+    recipient, so it can neither block-check nor push this route: blocks
+    are only enforced at the intro (an established session predates any
+    later block — the recipient's client must drop it), and the recipient
+    learns of new mailbox messages by polling listSealedMessages.
+
+  rkeys on both routes are `sealed-<ms>-<random hex>` (unique-rkey), so
+  neither the recipient DID nor the mailbox id appears in the record URI."
+  [client db {:keys [ciphertext] :as input}]
+  (let [sender (require-auth input)
+        [route msg] (sealed-route input)]
+    (cond
+      (or (nil? sender) (str/blank? (or ciphertext "")))
       (js/Promise.resolve {:error "InvalidRequest"
-                           :message "convoId, toDid, ciphertext, and valid session required"})
-      (-> (actor-blocked? _env toDid sender)
-          (.then (fn [blocked?]
-                   (if blocked?
-                     {:error "Blocked" :message "this actor is not accepting messages from you"}
-                     (-> (create client db mailbox-repo "app.aozora.convo.sealedMessage" value rkey)
-                         (.then (fn [r]
-                                  (push/notify-sealed-message! _env {:convo-id convoId :to-did toDid})
-                                  (assoc r :convoId convoId)))))))))))
+                           :message "ciphertext and valid session required"})
+
+      (= route :invalid)
+      (js/Promise.resolve {:error "InvalidRequest" :message msg})
+
+      (= route :intro)
+      (send-sealed-intro client db input sender)
+
+      :else
+      (send-sealed-mailbox client db input))))
 
 (defn mark-read
   "POST app.aozora.convo.markRead.
