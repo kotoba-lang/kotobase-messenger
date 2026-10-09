@@ -178,6 +178,109 @@
                  (is (= "InvalidRequest" (:error res)))
                  (done))))))
 
+;; ── mailbox route (ADR-2610081200 R1) ─────────────────────────────────────
+
+(def ^:private mailbox-id
+  "43-char base64url, the shape yoro-ui.interop.signal/mailbox-id produces."
+  "q3V2l0aF9vcGFxdWVfbWFpbGJveF9pZF8zMmJ5dGVzX")
+
+(deftest send-sealed-message-rejects-both-to-did-and-mailbox-id
+  (async done
+    (let [tx (atom nil)
+          orig kc/transact]
+      (set! kc/transact (stub-transact tx))
+      (-> (convo/send-sealed-message nil "yoro-social"
+                                     {:_auth-did "did:web:alice" :convoId "convo-1"
+                                      :toDid "did:web:bob" :mailboxId mailbox-id :ciphertext "x"})
+          (.then (fn [res]
+                   (is (= "InvalidRequest" (:error res)))
+                   (is (nil? @tx) "nothing written")))
+          (.finally (fn [] (set! kc/transact orig) (done)))))))
+
+(deftest send-sealed-message-rejects-neither-to-did-nor-mailbox-id
+  (async done
+    (-> (convo/send-sealed-message nil "yoro-social"
+                                   {:_auth-did "did:web:alice" :ciphertext "x"})
+        (.then (fn [res]
+                 (is (= "InvalidRequest" (:error res)))
+                 (done))))))
+
+(deftest send-sealed-message-rejects-malformed-mailbox-id
+  (async done
+    (-> (js/Promise.all
+         #js [(convo/send-sealed-message nil "yoro-social"
+                                         {:_auth-did "did:web:alice" :mailboxId "did:web:bob" :ciphertext "x"})
+              (convo/send-sealed-message nil "yoro-social"
+                                         {:_auth-did "did:web:alice" :mailboxId "short" :ciphertext "x"})])
+        (.then (fn [^js rs]
+                 (is (every? #(= "InvalidRequest" (:error %)) (array-seq rs))
+                     "a DID (or anything not a 43-char base64url id) can't be smuggled into mailboxId")
+                 (done))))))
+
+(deftest send-sealed-message-mailbox-route-requires-auth
+  (async done
+    (-> (convo/send-sealed-message nil "yoro-social" {:mailboxId mailbox-id :ciphertext "x"})
+        (.then (fn [res]
+                 (is (= "InvalidRequest" (:error res)))
+                 (done))))))
+
+(deftest send-sealed-message-mailbox-route-stores-no-to-did-anywhere
+  (async done
+    (let [tx (atom nil)
+          orig kc/transact]
+      (set! kc/transact (stub-transact tx))
+      (-> (convo/send-sealed-message nil "yoro-social"
+                                     {:_auth-did "did:web:alice"
+                                      :mailboxId mailbox-id
+                                      ;; a client that still sends convoId must not get it stored
+                                      :convoId "convo-1"
+                                      :ciphertext "opaque-envelope-json"})
+          (.then (fn [res]
+                   (is (nil? (:error res)))
+                   (is (str/starts-with? (:uri res) "at://mailbox/app.aozora.convo.sealedMessage/sealed-")
+                       "neutral mailbox repo, random rkey")
+                   (let [stored (tx-record-json @tx)
+                         value (js->clj (js/JSON.parse stored) :keywordize-keys true)]
+                     (is (= #{:mailboxId :ciphertext :rkey :createdAt} (set (keys value)))
+                         "the record value is exactly the opaque routing id + ciphertext + rkey + time")
+                     (is (= mailbox-id (:mailboxId value)))
+                     (is (not (str/includes? @tx "toDid")) "no toDid field anywhere in the tx")
+                     (is (not (str/includes? @tx "did:web:bob")))
+                     (is (not (str/includes? @tx "did:web:alice")) "nor the sender")
+                     (is (not (str/includes? @tx "convo-1")) "nor the convoId")
+                     (is (not (str/includes? (:rkey value) mailbox-id)) "rkey doesn't embed the mailbox id")
+                     (is (not (str/includes? (:uri res) mailbox-id)) "nor does the record URI"))))
+          (.finally (fn [] (set! kc/transact orig) (done)))))))
+
+(deftest send-sealed-message-mailbox-route-is-not-block-checked
+  (testing "the server can't know a mailbox's recipient, so it can't consult
+            their block list — blocks apply at the intro route only"
+    (async done
+      (let [tx (atom nil)
+            orig kc/transact]
+        (set! kc/transact (stub-transact tx))
+        (with-blocked true
+          #(-> (convo/send-sealed-message nil "yoro-social"
+                                          {:_auth-did "did:web:alice" :_env fake-env
+                                           :mailboxId mailbox-id :ciphertext "opaque"})
+               (.then (fn [res]
+                        (is (nil? (:error res)))
+                        (is (some? @tx))))
+               (.finally (fn [] (set! kc/transact orig) (done)))))))))
+
+(deftest send-sealed-message-intro-rkey-does-not-embed-to-did
+  (async done
+    (let [tx (atom nil)
+          orig kc/transact]
+      (set! kc/transact (stub-transact tx))
+      (-> (convo/send-sealed-message nil "yoro-social"
+                                     {:_auth-did "did:web:alice" :convoId "convo-1"
+                                      :toDid "did:web:bob" :ciphertext "opaque"})
+          (.then (fn [res]
+                   (is (not (str/includes? (:uri res) "did:web:bob"))
+                       "the intro record's VALUE still has toDid (by design), but its rkey/URI no longer does")))
+          (.finally (fn [] (set! kc/transact orig) (done)))))))
+
 (deftest create-convo-generates-id
   (async done
     (let [tx (atom nil)

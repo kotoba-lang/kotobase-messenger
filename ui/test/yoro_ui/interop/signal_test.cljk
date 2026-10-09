@@ -10,6 +10,7 @@
             [yoro-ui.interop.actor-key :as ak]
             [yoro-ui.interop.atproto :as at]
             [kotobase.cid :as cid]
+            [kotobase.cacao :as cacao]
             ["@noble/curves/ed25519.js" :refer [ed25519]]))
 
 ;; Node's built-in Web Storage global only activates with a --localstorage-file
@@ -23,6 +24,8 @@
           #js {:getItem (fn [k] (if (.has store k) (.get store k) nil))
                :setItem (fn [k v] (.set store k v) nil)
                :removeItem (fn [k] (.delete store k) nil)})))
+
+(defn- cacao-b64u [b] (cacao/bytes->base64url b))
 
 (defn- rand-seed [] (doto (js/Uint8Array. 32) (js/crypto.getRandomValues)))
 
@@ -42,11 +45,14 @@
   stub must also be a multi-arity `fn` (the `([args] body)` clause form) or
   the compiled arity-2 dispatch on the replaced var throws
   \"...cljs$core$IFn$_invoke$arity$2 is not a function\". `mailbox` (default
-  a fresh atom) holds app.aozora.convo.sendSealed writes, keyed by :toDid,
-  each entry a vector of {:convoId :toDid :ciphertext :createdAt :rkey} —
-  same shape aozora.appview.convo/list-sealed-messages would project."
+  a fresh atom) holds app.aozora.convo.sendSealed writes, keyed by :toDid
+  (intro route) or :mailboxId (mailbox route), each entry a vector of the
+  posted body + :rkey/:createdAt — same shape aozora.appview.convo/
+  list-sealed-messages would project. `sent` (optional atom) records every
+  sendSealed body in order."
   ([current-seed bundles] (install-fakes! current-seed bundles (atom {})))
-  ([current-seed bundles mailbox]
+  ([current-seed bundles mailbox] (install-fakes! current-seed bundles mailbox (atom [])))
+  ([current-seed bundles mailbox sent]
    (set! ak/seed (fn [] @current-seed))
    (set! at/at-procedure
          (fn
@@ -59,9 +65,10 @@
                 (js/Promise.resolve {:did did :uri "at://x/y/self" :cid "bafyx" :rkey "self"}))
 
               (= nsid "app.aozora.convo.sendSealed")
-              (let [rkey (str "sealed-" (:toDid body) "-" (random-uuid))]
-                (swap! mailbox update (:toDid body) (fnil conj [])
-                       (assoc body :rkey rkey :createdAt (or (:createdAt body) "2026-07-08T00:00:00Z")))
+              (let [rkey (str "sealed-" (random-uuid))]
+                (swap! sent conj body)
+                (swap! mailbox update (or (:toDid body) (:mailboxId body)) (fnil conj [])
+                       (assoc body :rkey rkey :createdAt (or (:createdAt body) (.toISOString (js/Date.)))))
                 (js/Promise.resolve {:rkey rkey :uri (str "at://mailbox/app.aozora.convo.sealedMessage/" rkey) :cid "bafyx"}))
 
               :else
@@ -77,7 +84,12 @@
                                     {:found false}))
 
               (= nsid "app.aozora.convo.listSealedMessages")
-              (js/Promise.resolve {:messages (vec (get @mailbox (:toDid params) []))})
+              (js/Promise.resolve
+               {:messages (if-let [mids (:mailboxIds params)]
+                            (vec (mapcat #(get @mailbox % []) (str/split mids #",")))
+                            (->> (get @mailbox (:toDid params) [])
+                                 (filter #(or (nil? (:convoId params)) (= (:convoId params) (:convoId %))))
+                                 vec))})
 
               :else
               (js/Promise.reject (js/Error. (str "unexpected query " nsid)))))))))
@@ -240,5 +252,116 @@
                    (is (every? #(not (str/includes? (js/JSON.stringify (clj->js %)) "\"senderDid\""))
                                (get @mailbox (:did bob)))
                        "the mailbox record itself (what an AppView scan would see) never has a top-level senderDid")))
+          (.then finish!)
+          (.catch (fn [e] (is false (str "unexpected rejection: " e)) (finish!)))))))
+
+;; ── session mailbox (ADR-2610081200 R1) ───────────────────────────────────
+
+(deftest mailbox-id-is-deterministic-and-direction-asymmetric
+  (async done
+    (let [k1 (rand-seed) k2 (rand-seed)]
+      (-> (js/Promise.all #js [(signal/mailbox-id k1 "did:key:bob")
+                               (signal/mailbox-id k1 "did:key:bob")
+                               (signal/mailbox-id k1 "did:key:alice")
+                               (signal/mailbox-id k2 "did:key:bob")])
+          (.then (fn [^js r]
+                   (let [[b1 b1' a1 b2] (array-seq r)]
+                     (is (= b1 b1') "same key + same recipient -> same id")
+                     (is (not= b1 a1) "the two directions of one session get different ids")
+                     (is (not= b1 b2) "a different session key gives a different id")
+                     (is (re-matches #"^[A-Za-z0-9_-]{43}$" b1) "43-char unpadded base64url (32-byte HMAC)")
+                     (is (not (str/includes? b1 "did:")) "the id is opaque — no DID inside"))))
+          (.then done)
+          (.catch (fn [e] (is false (str "unexpected rejection: " e)) (done)))))))
+
+(defn- stored-mailbox-key [my-did peer-did]
+  (some-> (#'signal/load-session-state my-did peer-did) :mailbox-key cacao-b64u))
+
+(deftest mailbox-key-agrees-across-parties-and-survives-ratchet-steps
+  (async done
+    (let [alice (make-party)
+          bob (make-party)
+          bundles (atom {})
+          current-seed (atom (:seed alice))
+          orig {:seed ak/seed :proc at/at-procedure :query at/at-appview-query}
+          finish! (fn [] (restore-fakes! orig) (done))
+          k0 (atom nil)]
+      (install-fakes! current-seed bundles)
+      (-> (signal/ensure-identity! (:did alice))
+          (.then (fn [_] (reset! current-seed (:seed bob)) (signal/ensure-identity! (:did bob))))
+          (.then (fn [_] (reset! current-seed (:seed alice))
+                   (signal/encrypt-message (:did alice) (:did bob) "one")))
+          (.then (fn [env] (signal/decrypt-message (:did bob) (:did alice) env)))
+          (.then (fn [_]
+                   (reset! k0 (stored-mailbox-key (:did alice) (:did bob)))
+                   (is (some? @k0) "initiator persisted a mailbox key at establishment")
+                   (is (= @k0 (stored-mailbox-key (:did bob) (:did alice)))
+                       "responder derived the SAME key from the same X3DH secret")
+                   ;; several DH-ratchet turns in both directions
+                   (signal/encrypt-message (:did bob) (:did alice) "two")))
+          (.then (fn [env] (signal/decrypt-message (:did alice) (:did bob) env)))
+          (.then (fn [_] (signal/encrypt-message (:did alice) (:did bob) "three")))
+          (.then (fn [env] (signal/decrypt-message (:did bob) (:did alice) env)))
+          (.then (fn [_] (signal/encrypt-message (:did bob) (:did alice) "four")))
+          (.then (fn [env] (signal/decrypt-message (:did alice) (:did bob) env)))
+          (.then (fn [_]
+                   (is (= @k0 (stored-mailbox-key (:did alice) (:did bob)))
+                       "alice's mailbox key unchanged after the ratchet advanced")
+                   (is (= @k0 (stored-mailbox-key (:did bob) (:did alice)))
+                       "bob's mailbox key unchanged after the ratchet advanced")
+                   (js/Promise.all #js [(signal/session-mailbox-id (:did alice) (:did bob) (:did bob))
+                                        (signal/session-mailbox-id (:did bob) (:did alice) (:did bob))])))
+          (.then (fn [^js r]
+                   (is (= (aget r 0) (aget r 1)) "both parties compute the same id for the bob-bound direction")))
+          (.then finish!)
+          (.catch (fn [e] (is false (str "unexpected rejection: " e)) (finish!)))))))
+
+(deftest sealed-mailbox-route-round-trips-without-to-did
+  (async done
+    (let [alice (make-party)
+          bob (make-party)
+          bundles (atom {})
+          mailbox (atom {})
+          sent (atom [])
+          current-seed (atom (:seed alice))
+          orig {:seed ak/seed :proc at/at-procedure :query at/at-appview-query}
+          finish! (fn [] (restore-fakes! orig) (done))]
+      (install-fakes! current-seed bundles mailbox sent)
+      (-> (signal/ensure-identity! (:did alice))
+          (.then (fn [_] (reset! current-seed (:seed bob)) (signal/ensure-identity! (:did bob))))
+          (.then (fn [_] (reset! current-seed (:seed alice))
+                   (signal/send-sealed! (:did alice) (:did bob) "convo-1" "first (intro)")))
+          (.then (fn [_] (signal/send-sealed! (:did alice) (:did bob) "convo-1" "second (mailbox)")))
+          (.then (fn [_]
+                   (let [[intro later] @sent]
+                     (is (= (:did bob) (:toDid intro)) "the session-establishing message goes by toDid")
+                     (is (= "convo-1" (:convoId intro)))
+                     (is (nil? (:mailboxId intro)))
+                     (is (some? (:mailboxId later)) "the next message goes by mailboxId")
+                     (is (= #{:mailboxId :ciphertext} (set (keys later)))
+                         "and carries nothing else in the clear — no toDid, no convoId")
+                     (is (not (str/includes? (js/JSON.stringify (clj->js later)) (:did bob)))))
+                   (reset! current-seed (:seed bob))
+                   (signal/fetch-sealed-messages! (:did bob) (:did alice) "convo-1")))
+          (.then (fn [received]
+                   (is (= ["first (intro)" "second (mailbox)"] (mapv :text received))
+                       "bob finds the intro by DID, then the mailbox message by his derived id")
+                   (is (every? #(= (:did alice) (:senderDid %)) received))
+                   (is (every? #(= "convo-1" (:convoId %)) received)
+                       "convoId of the mailbox message comes from the sealed payload")
+                   (signal/send-sealed! (:did bob) (:did alice) "convo-1" "reply (mailbox)")))
+          (.then (fn [_]
+                   (let [reply (last @sent)]
+                     (is (nil? (:toDid reply)) "the responder's first reply already uses the mailbox route")
+                     (is (not= (:mailboxId reply) (:mailboxId (second @sent)))
+                         "the alice-bound mailbox differs from the bob-bound one"))
+                   (reset! current-seed (:seed alice))
+                   (signal/fetch-sealed-messages! (:did alice) (:did bob) "convo-1")))
+          (.then (fn [received]
+                   (is (= ["reply (mailbox)"] (mapv :text received)))
+                   (is (= (:did bob) (:senderDid (first received))))
+                   (signal/fetch-sealed-messages! (:did alice) (:did bob) "other-convo")))
+          (.then (fn [received]
+                   (is (empty? received) "nothing new, and nothing from another convo")))
           (.then finish!)
           (.catch (fn [e] (is false (str "unexpected rejection: " e)) (finish!)))))))
