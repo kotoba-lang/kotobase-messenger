@@ -4,7 +4,7 @@
 
 **A LINE/Signal-style 1:1 and group messenger, built as AT-Protocol lexicons
 (`app.aozora.convo.*` / `app.aozora.actor.*`) over kotobase.** This is the
-messenger domain logic extracted out of `gftdcojp/app-aozora` (its original
+messenger domain logic extracted out of `network-awai/app-aozora` (its original
 home and current sole consumer) into a standalone, reusable ClojureScript
 library, per ADR-2607092345.
 
@@ -53,7 +53,7 @@ A consuming app's shadow-cljs build adds this repo's `pds/src` + `appview/src`
 + `ui/src` to its own `:source-paths`/`deps.edn` paths alongside its own
 copies of the namespaces above — the same relative-source-path pattern
 `kotoba-lang/org-signal` already established for the crypto layer. See
-`gftdcojp/app-aozora`'s `40-engine/cljs/shadow-cljs.edn` (backend) and
+`network-awai/app-aozora`'s `40-engine/cljs/shadow-cljs.edn` (backend) and
 `60-apps/appview/cljs/deps.edn` (frontend, `:deps true` in that dir's
 `shadow-cljs.edn` defers entirely to `deps.edn`) for working examples.
 
